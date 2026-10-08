@@ -13,6 +13,7 @@ canvas.height = HEIGHT;
 const keys = {};
 const bombs = [];
 const explosions = [];
+const bubbles = [];
 
 const player = {
     x: 1,
@@ -20,10 +21,18 @@ const player = {
     speed: 4,
     maxBombs: 1,
     activeBombs: 0,
-    alive: true
+    state: "normal",
+    bubbleTimer: 0
 };
 
-// 0 = floor, 1 = indestructible wall, 2 = destructible block
+const enemy = {
+    x: COLS - 3,
+    y: ROWS - 3,
+    state: "normal",
+    bubbleTimer: 0
+};
+
+// 0 = floor, 1 = solid wall, 2 = breakable block
 const map = Array.from({ length: ROWS }, (_, y) =>
     Array.from({ length: COLS }, (_, x) => {
         if (x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1) return 1;
@@ -32,7 +41,6 @@ const map = Array.from({ length: ROWS }, (_, y) =>
     })
 );
 
-// Add destructible blocks while leaving starting areas clear.
 for (let y = 1; y < ROWS - 1; y++) {
     for (let x = 1; x < COLS - 1; x++) {
         if (map[y][x] !== 0) continue;
@@ -41,8 +49,8 @@ for (let y = 1; y < ROWS - 1; y++) {
     }
 }
 
-function key(x, y) {
-    return x + "," + y;
+function tileOf(value) {
+    return Math.round(value);
 }
 
 function isBlockedTile(tx, ty) {
@@ -51,7 +59,7 @@ function isBlockedTile(tx, ty) {
 }
 
 function canMove(nx, ny) {
-    const r = 12;
+    const r = 11;
     const left = Math.floor((nx - r) / TILE);
     const right = Math.floor((nx + r) / TILE);
     const top = Math.floor((ny - r) / TILE);
@@ -64,19 +72,19 @@ function canMove(nx, ny) {
     }
 
     for (const bomb of bombs) {
-        if (bomb.x === Math.floor(nx / TILE) && bomb.y === Math.floor(ny / TILE)) {
-            const centerX = bomb.x * TILE + TILE / 2;
-            const centerY = bomb.y * TILE + TILE / 2;
-            if (Math.abs(nx - centerX) < TILE * 0.38 && Math.abs(ny - centerY) < TILE * 0.38) {
-                return false;
-            }
+        const cx = bomb.x * TILE + TILE / 2;
+        const cy = bomb.y * TILE + TILE / 2;
+        if (Math.abs(nx - cx) < TILE * 0.35 && Math.abs(ny - cy) < TILE * 0.35) {
+            return false;
         }
     }
 
     return true;
 }
 
-function tryMove(dx, dy) {
+function movePlayer(dx, dy) {
+    if (player.state !== "normal") return;
+
     const nx = player.x * TILE + TILE / 2 + dx;
     const ny = player.y * TILE + TILE / 2 + dy;
 
@@ -87,29 +95,71 @@ function tryMove(dx, dy) {
 }
 
 function placeBomb() {
-    if (!player.alive || player.activeBombs >= player.maxBombs) return;
+    if (player.state !== "normal") return;
+    if (player.activeBombs >= player.maxBombs) return;
 
-    const bx = Math.round(player.x);
-    const by = Math.round(player.y);
+    const bx = tileOf(player.x);
+    const by = tileOf(player.y);
 
     if (bombs.some(b => b.x === bx && b.y === by)) return;
 
-    bombs.push({
-        x: bx,
-        y: by,
-        timer: 1800
-    });
-
+    bombs.push({ x: bx, y: by, timer: 1800 });
     player.activeBombs++;
+}
+
+function createBubble(target) {
+    target.state = "bubble";
+    target.bubbleTimer = 4500;
+
+    bubbles.push({
+        target,
+        x: tileOf(target.x),
+        y: tileOf(target.y),
+        timer: 4500
+    });
+}
+
+function rescueBubble(target) {
+    const bubble = bubbles.find(b => b.target === target);
+    if (!bubble) return;
+
+    target.state = "normal";
+    target.bubbleTimer = 0;
+    bubbles.splice(bubbles.indexOf(bubble), 1);
+}
+
+function popBubble(target) {
+    const bubble = bubbles.find(b => b.target === target);
+    if (!bubble) return;
+
+    target.state = "defeated";
+    target.bubbleTimer = 0;
+    bubbles.splice(bubbles.indexOf(bubble), 1);
+}
+
+function checkExplosionHits(cells) {
+    const px = tileOf(player.x);
+    const py = tileOf(player.y);
+
+    if (player.state === "normal" && cells.some(c => c.x === px && c.y === py)) {
+        createBubble(player);
+    }
+
+    const ex = tileOf(enemy.x);
+    const ey = tileOf(enemy.y);
+
+    if (enemy.state === "normal" && cells.some(c => c.x === ex && c.y === ey)) {
+        createBubble(enemy);
+    }
 }
 
 function explodeBomb(bomb) {
     if (bomb.exploded) return;
+
     bomb.exploded = true;
     player.activeBombs = Math.max(0, player.activeBombs - 1);
 
     const cells = [{ x: bomb.x, y: bomb.y }];
-
     const dirs = [
         { x: 1, y: 0 },
         { x: -1, y: 0 },
@@ -134,12 +184,8 @@ function explodeBomb(bomb) {
         }
     }
 
-    explosions.push({
-        cells,
-        timer: 500
-    });
+    explosions.push({ cells, timer: 500 });
 
-    // Chain reaction.
     for (const other of bombs) {
         if (other === bomb || other.exploded) continue;
         if (cells.some(c => c.x === other.x && c.y === other.y)) {
@@ -147,14 +193,31 @@ function explodeBomb(bomb) {
         }
     }
 
-    // Hit player.
-    if (cells.some(c => c.x === Math.round(player.x) && c.y === Math.round(player.y))) {
-        player.alive = false;
+    checkExplosionHits(cells);
+}
+
+function updateBubbles(dt) {
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+        const bubble = bubbles[i];
+        bubble.timer -= dt;
+        bubble.target.bubbleTimer = bubble.timer;
+
+        if (bubble.timer <= 0) {
+            bubble.target.state = "defeated";
+            bubbles.splice(i, 1);
+        }
+    }
+
+    // The player can rescue the enemy bubble by standing on it.
+    if (enemy.state === "bubble" && player.state === "normal") {
+        if (tileOf(player.x) === tileOf(enemy.x) && tileOf(player.y) === tileOf(enemy.y)) {
+            popBubble(enemy);
+        }
     }
 }
 
 function update(dt) {
-    if (player.alive) {
+    if (player.state === "normal") {
         let dx = 0;
         let dy = 0;
 
@@ -168,12 +231,13 @@ function update(dt) {
             dy *= 0.707;
         }
 
-        tryMove(dx, 0);
-        tryMove(0, dy);
+        movePlayer(dx, 0);
+        movePlayer(0, dy);
     }
 
     for (let i = bombs.length - 1; i >= 0; i--) {
         bombs[i].timer -= dt;
+
         if (bombs[i].timer <= 0) {
             explodeBomb(bombs[i]);
             bombs.splice(i, 1);
@@ -184,6 +248,8 @@ function update(dt) {
         explosions[i].timer -= dt;
         if (explosions[i].timer <= 0) explosions.splice(i, 1);
     }
+
+    updateBubbles(dt);
 }
 
 function drawMap() {
@@ -241,7 +307,7 @@ function drawExplosions() {
             const px = cell.x * TILE;
             const py = cell.y * TILE;
 
-            ctx.fillStyle = "rgba(52, 152, 219, " + (0.35 + alpha * 0.45) + ")";
+            ctx.fillStyle = "rgba(52, 152, 219," + (0.35 + alpha * 0.45) + ")";
             ctx.fillRect(px + 3, py + 3, TILE - 6, TILE - 6);
 
             ctx.strokeStyle = "rgba(255,255,255," + alpha + ")";
@@ -251,20 +317,38 @@ function drawExplosions() {
     }
 }
 
-function drawPlayer() {
-    if (!player.alive) return;
+function drawCharacter(target, bodyColor, faceColor) {
+    if (target.state === "defeated") return;
 
-    const cx = player.x * TILE + TILE / 2;
-    const cy = player.y * TILE + TILE / 2;
+    const cx = target.x * TILE + TILE / 2;
+    const cy = target.y * TILE + TILE / 2;
 
-    ctx.fillStyle = "#f7f7f7";
+    if (target.state === "bubble") {
+        ctx.fillStyle = "rgba(120,210,255,.65)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 17, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 12px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(Math.ceil(target.bubbleTimer / 1000), cx, cy + 4);
+        ctx.textAlign = "left";
+        return;
+    }
+
+    ctx.fillStyle = bodyColor;
     ctx.beginPath();
-    ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = "#3498db";
+    ctx.fillStyle = faceColor;
     ctx.beginPath();
-    ctx.arc(cx, cy - 4, 8, Math.PI, 0);
+    ctx.arc(cx, cy - 3, 9, Math.PI, 0);
     ctx.fill();
 
     ctx.fillStyle = "#222";
@@ -273,24 +357,35 @@ function drawPlayer() {
 }
 
 function drawHud() {
-    ctx.fillStyle = "rgba(0,0,0,.7)";
+    ctx.fillStyle = "rgba(0,0,0,.72)";
     ctx.fillRect(0, 0, WIDTH, 34);
 
     ctx.fillStyle = "#fff";
     ctx.font = "16px Arial, Microsoft JhengHei";
-    ctx.fillText("彈水阿給 Prototype", 12, 22);
-    ctx.fillText("WASD / 方向鍵：移動    空白鍵：放水球", 260, 22);
+    ctx.fillText("彈水阿給 Prototype 2", 12, 22);
+    ctx.fillText("方向鍵/WASD：移動    SPACE：放水球", 260, 22);
 
-    if (!player.alive) {
-        ctx.fillStyle = "rgba(0,0,0,.65)";
+    if (enemy.state === "defeated") {
+        ctx.fillStyle = "rgba(0,0,0,.55)";
         ctx.fillRect(0, 0, WIDTH, HEIGHT);
-
         ctx.fillStyle = "#fff";
         ctx.textAlign = "center";
         ctx.font = "bold 42px Arial, Microsoft JhengHei";
-        ctx.fillText("你被水柱擊中了", WIDTH / 2, HEIGHT / 2 - 10);
+        ctx.fillText("勝利！", WIDTH / 2, HEIGHT / 2);
         ctx.font = "20px Arial, Microsoft JhengHei";
-        ctx.fillText("重新整理頁面再玩一次", WIDTH / 2, HEIGHT / 2 + 32);
+        ctx.fillText("你成功把對手的水泡刺破了", WIDTH / 2, HEIGHT / 2 + 38);
+        ctx.textAlign = "left";
+    }
+
+    if (player.state === "defeated") {
+        ctx.fillStyle = "rgba(0,0,0,.55)";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 42px Arial, Microsoft JhengHei";
+        ctx.fillText("遊戲結束", WIDTH / 2, HEIGHT / 2);
+        ctx.font = "20px Arial, Microsoft JhengHei";
+        ctx.fillText("水泡沒有被及時救援", WIDTH / 2, HEIGHT / 2 + 38);
         ctx.textAlign = "left";
     }
 }
@@ -300,7 +395,8 @@ function draw() {
     drawMap();
     drawExplosions();
     drawBombs();
-    drawPlayer();
+    drawCharacter(enemy, "#e67e22", "#f5cba7");
+    drawCharacter(player, "#3498db", "#f7f7f7");
     drawHud();
 }
 
@@ -309,10 +405,8 @@ let last = performance.now();
 function loop(now) {
     const dt = Math.min(40, now - last);
     last = now;
-
     update(dt);
     draw();
-
     requestAnimationFrame(loop);
 }
 
